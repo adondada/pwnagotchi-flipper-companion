@@ -1,0 +1,36 @@
+name: Bootstrap core source
+
+on:
+  push:
+    paths:
+      - '.github/bootstrap-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  decode-and-commit:
+    if: github.event.head_commit.message != 'Remove bootstrap payloads'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode exact source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p flipper pwnagotchi
+          base64 -d .bootstrap/flipper.c.gz.b64 | gzip -d > flipper/pwnagotchi_companion.c
+          base64 -d .bootstrap/flipperd.py.gz.b64 | gzip -d > pwnagotchi/flipperd.py
+          base64 -d .bootstrap/LICENSE.gz.b64 | gzip -d > LICENSE
+          chmod +x pwnagotchi/flipperd.py
+
+      - name: Commit decoded source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add flipper/pwnagotchi_companion.c pwnagotchi/flipperd.py LICENSE
+          git commit -m 'Add core v0.2.1 source'
+          git push
