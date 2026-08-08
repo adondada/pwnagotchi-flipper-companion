@@ -1,0 +1,12 @@
+App(
+    appid="pwnagotchi_companion",
+    name="Pwnagotchi Companion",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="pwnagotchi_companion_app",
+    stack_size=8 * 1024,
+    requires=["gui", "bt"],
+    fap_category="Bluetooth",
+    fap_version="0.2.1",
+    fap_description="Wireless Pwnagotchi display and dynamic plugin configuration companion",
+    fap_author="adondada",
+)
