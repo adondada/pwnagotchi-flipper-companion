@@ -1,0 +1,15 @@
+[Unit]
+Description=Pwnagotchi Flipper Zero BLE Companion
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/home/pi/.pwn/bin/python /opt/pwnagotchi-flipper/flipperd.py --config /etc/pwnagotchi/flipper.toml
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
