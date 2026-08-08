@@ -1,0 +1,15 @@
+# Flipper / ufbt
+.flipperzero-firmware/
+.ufbt/
+dist/
+*.fap
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
