@@ -1,0 +1,19 @@
+[bluetooth]
+# Leave blank to scan for the first device whose name starts with device_name_prefix.
+# After pairing, pinning the Flipper address makes reconnection deterministic.
+device_address = ""
+device_name_prefix = "Flipper"
+scan_timeout = 7.0
+reconnect_delay = 5.0
+pair = true
+
+[state]
+state_file = "/run/pwnagotchi-flipper/state.json"
+# Written by the Pwnagotchi bridge from the merged runtime config, the same
+# config object plugins/WebCFG receive after defaults and user config are merged.
+runtime_config_file = "/run/pwnagotchi-flipper/config.json"
+push_interval = 0.7
+
+[pwnagotchi]
+config_file = "/etc/pwnagotchi/config.toml"
+service_name = "pwnagotchi"
