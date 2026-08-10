@@ -168,8 +168,6 @@ static void flip_rpi_process_ble_rx(FlipRPIApp *app)
         }
     }
 
-    // Most iOS BLE terminal apps do not append CR/LF unless configured.
-    // Treat a short period with no additional BLE chunks as the Enter key.
     if (have_pending_text && app->ble_send_timer)
     {
         furi_timer_stop(app->ble_send_timer);
@@ -318,7 +316,8 @@ one(
 )
 
 one(
-    "    flip_rpi_ble_stop(app);\n    if (app->ble_rx_queue)\n",
+    "    free_widget(app);\n    free_text_input(app);\n    free_submenu_command(app);\n    free_text_box(app);\n\n    // free the FlipperHTTP",
+    "    free_widget(app);\n    free_text_input(app);\n    free_submenu_command(app);\n    free_text_box(app);\n\n"
     "    flip_rpi_ble_stop(app);\n"
     "    if (app->ble_send_timer)\n"
     "    {\n"
@@ -326,8 +325,13 @@ one(
     "        furi_timer_free(app->ble_send_timer);\n"
     "        app->ble_send_timer = NULL;\n"
     "    }\n"
-    "    if (app->ble_rx_queue)\n",
-    "free BLE timer",
+    "    if (app->ble_rx_queue)\n"
+    "    {\n"
+    "        furi_message_queue_free(app->ble_rx_queue);\n"
+    "        app->ble_rx_queue = NULL;\n"
+    "    }\n\n"
+    "    // free the FlipperHTTP",
+    "free BLE resources",
 )
 
 p.write_text(s)
