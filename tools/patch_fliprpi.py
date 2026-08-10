@@ -24,7 +24,7 @@ one(
 
 one(
     '#define VERSION_TAG TAG " v1.0"',
-    '#define VERSION_TAG TAG " v1.1 BLE"',
+    '#define VERSION_TAG TAG " v1.2 BLE"',
     "version tag",
 )
 
@@ -33,7 +33,8 @@ one(
     "#define MAX_COMMANDS 54\n"
     "#define BLE_RX_PACKET_MAX 512\n"
     "#define BLE_COMMAND_MAX 512\n"
-    "#define BLE_SERIAL_BUFFER_SIZE 4096\n\n"
+    "#define BLE_SERIAL_BUFFER_SIZE 4096\n"
+    "#define BLE_COMMAND_IDLE_MS 150\n\n"
     "typedef struct {\n"
     "    uint16_t size;\n"
     "    uint8_t data[BLE_RX_PACKET_MAX];\n"
@@ -43,7 +44,7 @@ one(
 
 one(
     "typedef enum\n{\n    FlipRPICustomEventUART\n} FlipRPICustomEvent;",
-    "typedef enum\n{\n    FlipRPICustomEventUART,\n    FlipRPICustomEventBLE\n} FlipRPICustomEvent;",
+    "typedef enum\n{\n    FlipRPICustomEventUART,\n    FlipRPICustomEventBLE,\n    FlipRPICustomEventBLEFlush\n} FlipRPICustomEvent;",
     "custom event enum",
 )
 
@@ -54,6 +55,7 @@ one(
     "    Bt *bt;\n"
     "    FuriHalBleProfileBase *ble_serial_profile;\n"
     "    FuriMessageQueue *ble_rx_queue;\n"
+    "    FuriTimer *ble_send_timer;\n"
     "    char ble_command[BLE_COMMAND_MAX];\n"
     "    size_t ble_command_len;\n"
     "} FlipRPIApp;",
@@ -116,6 +118,15 @@ static void flip_rpi_send_ble_command(FlipRPIApp *app)
     }
 }
 
+static void flip_rpi_ble_flush_timer_callback(void *context)
+{
+    FlipRPIApp *app = (FlipRPIApp *)context;
+    if (app && app->view_dispatcher)
+    {
+        view_dispatcher_send_custom_event(app->view_dispatcher, FlipRPICustomEventBLEFlush);
+    }
+}
+
 static void flip_rpi_process_ble_rx(FlipRPIApp *app)
 {
     if (!app->ble_rx_queue)
@@ -124,6 +135,8 @@ static void flip_rpi_process_ble_rx(FlipRPIApp *app)
     }
 
     FlipRPIBlePacket packet;
+    bool have_pending_text = false;
+
     while (furi_message_queue_get(app->ble_rx_queue, &packet, 0) == FuriStatusOk)
     {
         for (uint16_t i = 0; i < packet.size; i++)
@@ -132,20 +145,35 @@ static void flip_rpi_process_ble_rx(FlipRPIApp *app)
 
             if (c == '\r' || c == '\n')
             {
+                if (app->ble_send_timer)
+                {
+                    furi_timer_stop(app->ble_send_timer);
+                }
                 flip_rpi_send_ble_command(app);
+                have_pending_text = false;
                 continue;
             }
 
             if (app->ble_command_len < BLE_COMMAND_MAX - 1)
             {
                 app->ble_command[app->ble_command_len++] = c;
+                have_pending_text = true;
             }
             else
             {
                 FURI_LOG_W(TAG, "BLE command too long; dropping buffered command");
                 app->ble_command_len = 0;
+                have_pending_text = false;
             }
         }
+    }
+
+    // Most iOS BLE terminal apps do not append CR/LF unless configured.
+    // Treat a short period with no additional BLE chunks as the Enter key.
+    if (have_pending_text && app->ble_send_timer)
+    {
+        furi_timer_stop(app->ble_send_timer);
+        furi_timer_start(app->ble_send_timer, furi_ms_to_ticks(BLE_COMMAND_IDLE_MS));
     }
 }
 
@@ -249,7 +277,8 @@ s = s.replace(marker, ble_code + marker, 1)
 one(
     "    case FlipRPICustomEventUART:\n        flip_rpi_loader_process_callback(context);\n        return true;\n",
     "    case FlipRPICustomEventUART:\n        flip_rpi_loader_process_callback(context);\n        return true;\n"
-    "    case FlipRPICustomEventBLE:\n        flip_rpi_process_ble_rx((FlipRPIApp *)context);\n        return true;\n",
+    "    case FlipRPICustomEventBLE:\n        flip_rpi_process_ble_rx((FlipRPIApp *)context);\n        return true;\n"
+    "    case FlipRPICustomEventBLEFlush:\n        flip_rpi_send_ble_command((FlipRPIApp *)context);\n        return true;\n",
     "BLE event handler",
 )
 
@@ -274,6 +303,12 @@ one(
     '        FURI_LOG_E(TAG, "Failed to allocate BLE RX queue");\n'
     "        return NULL;\n"
     "    }\n"
+    "    app->ble_send_timer = furi_timer_alloc(flip_rpi_ble_flush_timer_callback, FuriTimerTypeOnce, app);\n"
+    "    if (!app->ble_send_timer)\n"
+    "    {\n"
+    '        FURI_LOG_E(TAG, "Failed to allocate BLE send timer");\n'
+    "        return NULL;\n"
+    "    }\n"
     "    if (!flip_rpi_ble_start(app))\n"
     "    {\n"
     '        FURI_LOG_E(TAG, "BLE phone input failed to start; normal FlipRPI remains available");\n'
@@ -283,16 +318,16 @@ one(
 )
 
 one(
-    "    free_widget(app);\n    free_text_input(app);\n    free_submenu_command(app);\n    free_text_box(app);\n\n    // free the FlipperHTTP",
-    "    free_widget(app);\n    free_text_input(app);\n    free_submenu_command(app);\n    free_text_box(app);\n\n"
+    "    flip_rpi_ble_stop(app);\n    if (app->ble_rx_queue)\n",
     "    flip_rpi_ble_stop(app);\n"
-    "    if (app->ble_rx_queue)\n"
+    "    if (app->ble_send_timer)\n"
     "    {\n"
-    "        furi_message_queue_free(app->ble_rx_queue);\n"
-    "        app->ble_rx_queue = NULL;\n"
-    "    }\n\n"
-    "    // free the FlipperHTTP",
-    "free BLE",
+    "        furi_timer_stop(app->ble_send_timer);\n"
+    "        furi_timer_free(app->ble_send_timer);\n"
+    "        app->ble_send_timer = NULL;\n"
+    "    }\n"
+    "    if (app->ble_rx_queue)\n",
+    "free BLE timer",
 )
 
 p.write_text(s)
@@ -300,7 +335,7 @@ p.write_text(s)
 fam = Path("FlipRPI/application.fam")
 fs = fam.read_text()
 fs = fs.replace("stack_size=4 * 1024", "stack_size=8 * 1024")
-fs = fs.replace('fap_version="1.0"', 'fap_version="1.1"')
+fs = fs.replace('fap_version="1.0"', 'fap_version="1.2"')
 fam.write_text(fs)
 
-print("FlipRPI patched for iPhone BLE serial command input")
+print("FlipRPI patched for iPhone BLE serial command input v1.2")
