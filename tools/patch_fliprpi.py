@@ -24,7 +24,7 @@ one(
 
 one(
     '#define VERSION_TAG TAG " v1.0"',
-    '#define VERSION_TAG TAG " v1.4 BLE"',
+    '#define VERSION_TAG TAG " v1.5 BLE"',
     "version tag",
 )
 
@@ -32,7 +32,9 @@ one(
     "#define MAX_COMMANDS 54\n",
     "#define MAX_COMMANDS 54\n"
     "#define BLE_RX_PACKET_MAX 512\n"
-    "#define BLE_SERIAL_BUFFER_SIZE 4096\n\n"
+    "#define BLE_COMMAND_MAX 512\n"
+    "#define BLE_SERIAL_BUFFER_SIZE 4096\n"
+    "#define BLE_COMMAND_IDLE_MS 1500\n\n"
     "typedef struct {\n"
     "    uint16_t size;\n"
     "    uint8_t data[BLE_RX_PACKET_MAX];\n"
@@ -42,7 +44,7 @@ one(
 
 one(
     "typedef enum\n{\n    FlipRPICustomEventUART\n} FlipRPICustomEvent;",
-    "typedef enum\n{\n    FlipRPICustomEventUART,\n    FlipRPICustomEventBLE\n} FlipRPICustomEvent;",
+    "typedef enum\n{\n    FlipRPICustomEventUART,\n    FlipRPICustomEventBLE,\n    FlipRPICustomEventBLEFlush\n} FlipRPICustomEvent;",
     "custom event enum",
 )
 
@@ -52,6 +54,9 @@ one(
     "    Bt *bt;\n"
     "    FuriHalBleProfileBase *ble_serial_profile;\n"
     "    FuriMessageQueue *ble_rx_queue;\n"
+    "    FuriTimer *ble_send_timer;\n"
+    "    char ble_command[BLE_COMMAND_MAX];\n"
+    "    size_t ble_command_len;\n"
     "} FlipRPIApp;",
     "app fields",
 )
@@ -78,38 +83,27 @@ static bool flip_rpi_ensure_uart(FlipRPIApp *app)
     return true;
 }
 
-static void flip_rpi_send_ble_packet(FlipRPIApp *app, const uint8_t *data, size_t size)
+static void flip_rpi_send_buffered_command(FlipRPIApp *app)
 {
-    if (!data || size == 0)
+    if (app->ble_command_len == 0)
     {
         return;
     }
 
     if (!flip_rpi_ensure_uart(app))
     {
+        app->ble_command_len = 0;
         return;
     }
 
-    char command[BLE_RX_PACKET_MAX + 2];
-    size_t len = 0;
-    for (size_t i = 0; i < size && len < BLE_RX_PACKET_MAX; i++)
-    {
-        char c = (char)data[i];
-        if (c != '\r' && c != '\n')
-        {
-            command[len++] = c;
-        }
-    }
-
-    if (len == 0)
-    {
-        return;
-    }
-
+    char command[BLE_COMMAND_MAX + 2];
+    size_t len = app->ble_command_len;
+    memcpy(command, app->ble_command, len);
     command[len++] = '\n';
     command[len] = '\0';
+    app->ble_command_len = 0;
 
-    FURI_LOG_I(TAG, "BLE write -> UART command (%zu bytes)", len - 1);
+    FURI_LOG_I(TAG, "BLE buffered -> UART command (%zu bytes)", len - 1);
     if (!flipper_http_send_data(app->fhttp, command))
     {
         FURI_LOG_E(TAG, "Failed to send BLE command over UART");
@@ -123,6 +117,15 @@ static void flip_rpi_send_ble_packet(FlipRPIApp *app, const uint8_t *data, size_
     }
 }
 
+static void flip_rpi_ble_flush_timer_callback(void *context)
+{
+    FlipRPIApp *app = (FlipRPIApp *)context;
+    if (app && app->view_dispatcher)
+    {
+        view_dispatcher_send_custom_event(app->view_dispatcher, FlipRPICustomEventBLEFlush);
+    }
+}
+
 static void flip_rpi_process_ble_rx(FlipRPIApp *app)
 {
     if (!app->ble_rx_queue)
@@ -131,9 +134,56 @@ static void flip_rpi_process_ble_rx(FlipRPIApp *app)
     }
 
     FlipRPIBlePacket packet;
+    bool buffered_any = false;
+
     while (furi_message_queue_get(app->ble_rx_queue, &packet, 0) == FuriStatusOk)
     {
-        flip_rpi_send_ble_packet(app, packet.data, packet.size);
+        for (uint16_t i = 0; i < packet.size; i++)
+        {
+            const char c = (char)packet.data[i];
+
+            if (c == '\r' || c == '\n')
+            {
+                if (app->ble_send_timer)
+                {
+                    furi_timer_stop(app->ble_send_timer);
+                }
+                flip_rpi_send_buffered_command(app);
+                buffered_any = false;
+                continue;
+            }
+
+            if (c == '\b' || (uint8_t)c == 0x7F)
+            {
+                if (app->ble_command_len > 0)
+                {
+                    app->ble_command_len--;
+                }
+                buffered_any = app->ble_command_len > 0;
+                continue;
+            }
+
+            if (app->ble_command_len < BLE_COMMAND_MAX - 1)
+            {
+                app->ble_command[app->ble_command_len++] = c;
+                buffered_any = true;
+            }
+            else
+            {
+                FURI_LOG_W(TAG, "BLE command too long; dropping buffered command");
+                app->ble_command_len = 0;
+                buffered_any = false;
+            }
+        }
+    }
+
+    // The iPhone terminal sends each key as a separate BLE write. Reset a
+    // one-shot timer after every key so normal typing becomes one command.
+    // If the terminal actually sends CR/LF on Return, execution is immediate.
+    if (buffered_any && app->ble_send_timer)
+    {
+        furi_timer_stop(app->ble_send_timer);
+        furi_timer_start(app->ble_send_timer, furi_ms_to_ticks(BLE_COMMAND_IDLE_MS));
     }
 }
 
@@ -175,13 +225,12 @@ static bool flip_rpi_ble_start(FlipRPIApp *app)
     bt_disconnect(app->bt);
     furi_delay_ms(200);
 
-    // v1.4 intentionally uses a fresh bond store and BLE identity so iOS
-    // cannot reuse stale pairing/GATT state from previous test builds.
-    bt_keys_storage_set_storage_path(app->bt, APP_DATA_PATH(".fliprpi_ble_v14.keys"));
+    // Fresh identity again so iOS cannot reuse a stale bond from test builds.
+    bt_keys_storage_set_storage_path(app->bt, APP_DATA_PATH(".fliprpi_ble_v15.keys"));
 
     BleProfileSerialParams params = {
-        .device_name_prefix = "FRPI14",
-        .mac_xor = 0x0144,
+        .device_name_prefix = "FRPI15",
+        .mac_xor = 0x0155,
     };
 
     app->ble_serial_profile = bt_profile_start(app->bt, ble_profile_serial, &params);
@@ -199,7 +248,7 @@ static bool flip_rpi_ble_start(FlipRPIApp *app)
         flip_rpi_ble_serial_callback,
         app);
     furi_hal_bt_start_advertising();
-    FURI_LOG_I(TAG, "BLE phone input advertising with fresh v1.4 identity");
+    FURI_LOG_I(TAG, "BLE phone input advertising as FRPI15");
     return true;
 }
 
@@ -239,7 +288,8 @@ s = s.replace(marker, ble_code + marker, 1)
 one(
     "    case FlipRPICustomEventUART:\n        flip_rpi_loader_process_callback(context);\n        return true;\n",
     "    case FlipRPICustomEventUART:\n        flip_rpi_loader_process_callback(context);\n        return true;\n"
-    "    case FlipRPICustomEventBLE:\n        flip_rpi_process_ble_rx((FlipRPIApp *)context);\n        return true;\n",
+    "    case FlipRPICustomEventBLE:\n        flip_rpi_process_ble_rx((FlipRPIApp *)context);\n        return true;\n"
+    "    case FlipRPICustomEventBLEFlush:\n        flip_rpi_send_buffered_command((FlipRPIApp *)context);\n        return true;\n",
     "BLE event handler",
 )
 
@@ -264,6 +314,14 @@ one(
     '        FURI_LOG_E(TAG, "Failed to allocate BLE RX queue");\n'
     "        return NULL;\n"
     "    }\n"
+    "    app->ble_send_timer = furi_timer_alloc(flip_rpi_ble_flush_timer_callback, FuriTimerTypeOnce, app);\n"
+    "    if (!app->ble_send_timer)\n"
+    "    {\n"
+    '        FURI_LOG_E(TAG, "Failed to allocate BLE send timer");\n'
+    "        furi_message_queue_free(app->ble_rx_queue);\n"
+    "        app->ble_rx_queue = NULL;\n"
+    "        return NULL;\n"
+    "    }\n"
     "    if (!flip_rpi_ble_start(app))\n"
     "    {\n"
     '        FURI_LOG_E(TAG, "BLE phone input failed to start; normal FlipRPI remains available");\n'
@@ -276,6 +334,12 @@ one(
     "    free_widget(app);\n    free_text_input(app);\n    free_submenu_command(app);\n    free_text_box(app);\n\n    // free the FlipperHTTP",
     "    free_widget(app);\n    free_text_input(app);\n    free_submenu_command(app);\n    free_text_box(app);\n\n"
     "    flip_rpi_ble_stop(app);\n"
+    "    if (app->ble_send_timer)\n"
+    "    {\n"
+    "        furi_timer_stop(app->ble_send_timer);\n"
+    "        furi_timer_free(app->ble_send_timer);\n"
+    "        app->ble_send_timer = NULL;\n"
+    "    }\n"
     "    if (app->ble_rx_queue)\n"
     "    {\n"
     "        furi_message_queue_free(app->ble_rx_queue);\n"
@@ -290,7 +354,7 @@ p.write_text(s)
 fam = Path("FlipRPI/application.fam")
 fs = fam.read_text()
 fs = fs.replace("stack_size=4 * 1024", "stack_size=8 * 1024")
-fs = fs.replace('fap_version="1.0"', 'fap_version="1.4"')
+fs = fs.replace('fap_version="1.0"', 'fap_version="1.5"')
 fam.write_text(fs)
 
-print("FlipRPI patched for iPhone BLE serial command input v1.4 fresh identity")
+print("FlipRPI patched for iPhone BLE buffered keyboard input v1.5")
