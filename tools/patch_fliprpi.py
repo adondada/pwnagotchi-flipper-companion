@@ -24,7 +24,7 @@ one(
 
 one(
     '#define VERSION_TAG TAG " v1.0"',
-    '#define VERSION_TAG TAG " v1.3 BLE"',
+    '#define VERSION_TAG TAG " v1.4 BLE"',
     "version tag",
 )
 
@@ -49,7 +49,6 @@ one(
 one(
     "    FuriTimer *timer; // timer to redraw the UART data as it comes in\n} FlipRPIApp;",
     "    FuriTimer *timer; // timer to redraw the UART data as it comes in\n\n"
-    "    // BLE phone input: iPhone -> BLE -> FlipRPI -> Pi UART\n"
     "    Bt *bt;\n"
     "    FuriHalBleProfileBase *ble_serial_profile;\n"
     "    FuriMessageQueue *ble_rx_queue;\n"
@@ -93,9 +92,6 @@ static void flip_rpi_send_ble_packet(FlipRPIApp *app, const uint8_t *data, size_
 
     char command[BLE_RX_PACKET_MAX + 2];
     size_t len = 0;
-
-    // A press of Send in the phone terminal is one BLE write. Strip any
-    // CR/LF the terminal may already append, then add exactly one newline.
     for (size_t i = 0; i < size && len < BLE_RX_PACKET_MAX; i++)
     {
         char c = (char)data[i];
@@ -176,15 +172,16 @@ static bool flip_rpi_ble_start(FlipRPIApp *app)
         return false;
     }
 
-    // Keep this startup path identical to v1.1, which paired reliably.
     bt_disconnect(app->bt);
     furi_delay_ms(200);
 
-    bt_keys_storage_set_storage_path(app->bt, APP_DATA_PATH(".fliprpi_ble.keys"));
+    // v1.4 intentionally uses a fresh bond store and BLE identity so iOS
+    // cannot reuse stale pairing/GATT state from previous test builds.
+    bt_keys_storage_set_storage_path(app->bt, APP_DATA_PATH(".fliprpi_ble_v14.keys"));
 
     BleProfileSerialParams params = {
-        .device_name_prefix = "FlipRPI",
-        .mac_xor = 0x0042,
+        .device_name_prefix = "FRPI14",
+        .mac_xor = 0x0144,
     };
 
     app->ble_serial_profile = bt_profile_start(app->bt, ble_profile_serial, &params);
@@ -202,7 +199,7 @@ static bool flip_rpi_ble_start(FlipRPIApp *app)
         flip_rpi_ble_serial_callback,
         app);
     furi_hal_bt_start_advertising();
-    FURI_LOG_I(TAG, "BLE phone input advertising as FlipRPI");
+    FURI_LOG_I(TAG, "BLE phone input advertising with fresh v1.4 identity");
     return true;
 }
 
@@ -293,7 +290,7 @@ p.write_text(s)
 fam = Path("FlipRPI/application.fam")
 fs = fam.read_text()
 fs = fs.replace("stack_size=4 * 1024", "stack_size=8 * 1024")
-fs = fs.replace('fap_version="1.0"', 'fap_version="1.3"')
+fs = fs.replace('fap_version="1.0"', 'fap_version="1.4"')
 fam.write_text(fs)
 
-print("FlipRPI patched for iPhone BLE serial command input v1.3")
+print("FlipRPI patched for iPhone BLE serial command input v1.4 fresh identity")
